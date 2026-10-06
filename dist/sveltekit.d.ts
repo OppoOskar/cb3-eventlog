@@ -1,25 +1,47 @@
-import type { HandleServerError, RequestEvent, RequestHandler } from "@sveltejs/kit";
 import type { EventLog } from "./store.js";
 import { type LogContext } from "./types.js";
-export interface SvelteKitOptions {
+/**
+ * The parts of SvelteKit's RequestEvent this adapter uses. Declared here
+ * (structurally) instead of importing @sveltejs/kit, so the package carries no
+ * second copy of kit/svelte types into the app. Pass the app's own
+ * `RequestEvent` as the type parameter to get typed `locals` in callbacks.
+ */
+export interface KitEvent {
+    request: Request;
+    url: URL;
+    route: {
+        id: string | null;
+    };
+    params: Partial<Record<string, string>>;
+}
+export interface SvelteKitOptions<E extends KitEvent> {
     /** Guards the admin routes (list/group/event). Throw (e.g. kit's `error(403)` or `redirect`) to deny. */
-    authorize: (event: RequestEvent) => Promise<void> | void;
+    authorize: (event: E) => Promise<void> | void;
     /** The signed-in user, if any — attached to every event from a request. */
-    getUser?: (event: RequestEvent) => {
+    getUser?: (event: E) => {
         id: unknown;
         role?: string;
     } | null | undefined;
-    getRequestId?: (event: RequestEvent) => string | undefined;
+    getRequestId?: (event: E) => string | undefined;
     /** Service name stored on browser reports. Default: `${log.service}-client`. */
     clientService?: string;
     /** Message shown on the error page for unexpected errors. */
     errorMessage?: string;
     notFoundMessage?: string;
 }
-export declare const createSvelteKitEventlog: (log: EventLog, options: SvelteKitOptions) => {
-    ctxFromEvent: (event: RequestEvent, extra?: LogContext) => LogContext;
-    handleError: HandleServerError;
-    recordServerErrorResponse: (event: RequestEvent, response: Response, prefix?: string) => void;
+type Handler<E> = (event: E) => Promise<Response>;
+export declare const createSvelteKitEventlog: <E extends KitEvent = KitEvent>(log: EventLog, options: SvelteKitOptions<E>) => {
+    ctxFromEvent: (event: E, extra?: LogContext) => LogContext;
+    handleError: ({ error, event, status }: {
+        error: unknown;
+        event: E;
+        status: number;
+        message: string;
+    }) => {
+        message: string;
+        errorId?: string;
+    };
+    recordServerErrorResponse: (event: E, response: Response, prefix?: string) => void;
     /**
      * Route handlers. Wire them up as:
      *   api/logs/+server.ts                  → POST = ingest, GET = list
@@ -28,15 +50,16 @@ export declare const createSvelteKitEventlog: (log: EventLog, options: SvelteKit
      */
     routes: {
         logs: {
-            POST: RequestHandler;
-            GET: RequestHandler;
+            POST: Handler<E>;
+            GET: Handler<E>;
         };
         group: {
-            GET: RequestHandler;
-            PATCH: RequestHandler;
+            GET: Handler<E>;
+            PATCH: Handler<E>;
         };
         event: {
-            GET: RequestHandler;
+            GET: Handler<E>;
         };
     };
 };
+export {};

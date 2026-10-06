@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Db } from "mongodb";
+import type { Collection } from "mongodb";
 import { fingerprint, topFrame } from "./fingerprint.js";
 import { EVENT_COLLECTION, GROUP_COLLECTION } from "./indexes.js";
 import { normalizeError, sanitizeData, truncate } from "./serialize.js";
@@ -58,8 +58,17 @@ interface EventDoc {
   data?: EventData;
 }
 
+/**
+ * Anything with `collection(name)` — a mongodb `Db`. Typed structurally so an
+ * app's driver copy never has to match this package's (linked installs, minor
+ * version drift).
+ */
+export interface DbLike {
+  collection(name: string): unknown;
+}
+
 export interface EventLogOptions {
-  db: Db;
+  db: DbLike;
   /** Name of the emitting service, e.g. "cbp3" or "media-worker". */
   service: string;
   /** Build/deploy id stored on every event. */
@@ -137,8 +146,8 @@ const dayKey = (d: Date) => d.toISOString().slice(0, 10);
 export type EventLog = ReturnType<typeof createEventLog>;
 
 export const createEventLog = (options: EventLogOptions) => {
-  const groups = options.db.collection<GroupDoc>(GROUP_COLLECTION);
-  const events = options.db.collection<EventDoc>(EVENT_COLLECTION);
+  const groups = options.db.collection(GROUP_COLLECTION) as Collection<GroupDoc>;
+  const events = options.db.collection(EVENT_COLLECTION) as Collection<EventDoc>;
   const retention = { ...DEFAULT_RETENTION, ...options.retentionDays };
 
   const write = async (

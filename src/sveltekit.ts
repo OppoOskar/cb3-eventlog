@@ -1,16 +1,28 @@
-import type { HandleServerError, RequestEvent, RequestHandler } from "@sveltejs/kit";
 import type { EventLog } from "./store.js";
 import { GROUP_STATUSES, type GroupStatus, type LogContext } from "./types.js";
 import { parseClientReport, parseGroupFilter, parsePagination, pathOf } from "./validate.js";
 import { truncate } from "./serialize.js";
 import { LIMITS } from "./types.js";
 
-export interface SvelteKitOptions {
+/**
+ * The parts of SvelteKit's RequestEvent this adapter uses. Declared here
+ * (structurally) instead of importing @sveltejs/kit, so the package carries no
+ * second copy of kit/svelte types into the app. Pass the app's own
+ * `RequestEvent` as the type parameter to get typed `locals` in callbacks.
+ */
+export interface KitEvent {
+  request: Request;
+  url: URL;
+  route: { id: string | null };
+  params: Partial<Record<string, string>>;
+}
+
+export interface SvelteKitOptions<E extends KitEvent> {
   /** Guards the admin routes (list/group/event). Throw (e.g. kit's `error(403)` or `redirect`) to deny. */
-  authorize: (event: RequestEvent) => Promise<void> | void;
+  authorize: (event: E) => Promise<void> | void;
   /** The signed-in user, if any — attached to every event from a request. */
-  getUser?: (event: RequestEvent) => { id: unknown; role?: string } | null | undefined;
-  getRequestId?: (event: RequestEvent) => string | undefined;
+  getUser?: (event: E) => { id: unknown; role?: string } | null | undefined;
+  getRequestId?: (event: E) => string | undefined;
   /** Service name stored on browser reports. Default: `${log.service}-client`. */
   clientService?: string;
   /** Message shown on the error page for unexpected errors. */
@@ -24,12 +36,14 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const fail = (error: string, status = 400) => json({ success: false, error }, status);
 
-export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions) => {
+type Handler<E> = (event: E) => Promise<Response>;
+
+export const createSvelteKitEventlog = <E extends KitEvent = KitEvent>(log: EventLog, options: SvelteKitOptions<E>) => {
   /** Requests already logged by handleError, so the 5xx check doesn't log them twice. */
   const reported = new WeakSet<Request>();
 
   /** Request context for a log call: route, method, path, user, request id, user agent. */
-  const ctxFromEvent = (event: RequestEvent, extra: LogContext = {}): LogContext => {
+  const ctxFromEvent = (event: E, extra: LogContext = {}): LogContext => {
     const user = options.getUser?.(event);
     return {
       requestId: options.getRequestId?.(event),
@@ -43,9 +57,10 @@ export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions
     };
   };
 
-  const handleError: HandleServerError = ({ error, event, status }) => {
+  /** Use as `export const handleError: HandleServerError = eventlog.handleError` in hooks.server.ts. */
+  const handleError = ({ error, event, status }: { error: unknown; event: E; status: number; message: string }) => {
     // Unknown routes also land here — not worth recording.
-    if (status === 404) return { message: options.notFoundMessage ?? "Not found" };
+    if (status === 404) return { message: options.notFoundMessage ?? "Not found" } as { message: string; errorId?: string };
     reported.add(event.request);
     const errorId = log.error(error, ctxFromEvent(event, { status }));
     return { message: options.errorMessage ?? "Something went wrong", errorId };
@@ -55,7 +70,7 @@ export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions
    * Call from `handle` after `resolve`: records 5xx responses under `prefix`
    * that no thrown error accounted for (routes that *return* a 500).
    */
-  const recordServerErrorResponse = (event: RequestEvent, response: Response, prefix = "/api/") => {
+  const recordServerErrorResponse = (event: E, response: Response, prefix = "/api/") => {
     if (response.status < 500 || reported.has(event.request) || !event.url.pathname.startsWith(prefix)) return;
     const route = event.route.id ?? event.url.pathname;
     log.error(new Error(`${event.request.method} ${route} responded ${response.status}`), {
@@ -65,7 +80,7 @@ export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions
     });
   };
 
-  const ingest: RequestHandler = async (event) => {
+  const ingest: Handler<E> = async (event) => {
     const body = await event.request.text();
     if (body.length > MAX_BODY_BYTES) return fail("Payload too large", 413);
 
@@ -105,7 +120,7 @@ export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions
     return new Response(null, { status: 204 });
   };
 
-  const list: RequestHandler = async (event) => {
+  const list: Handler<E> = async (event) => {
     await options.authorize(event);
     const pagination = parsePagination(event.url);
     if (!pagination) return fail("Invalid page or pageSize");
@@ -114,13 +129,13 @@ export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions
     return json(await log.query.listGroups(filter.value, pagination));
   };
 
-  const getGroup: RequestHandler = async (event) => {
+  const getGroup: Handler<E> = async (event) => {
     await options.authorize(event);
     const detail = await log.query.getGroup(event.params.id ?? "");
     return detail ? json(detail) : fail("Not found", 404);
   };
 
-  const patchGroup: RequestHandler = async (event) => {
+  const patchGroup: Handler<E> = async (event) => {
     await options.authorize(event);
     const body = (await event.request.json().catch(() => null)) as { status?: unknown } | null;
     if (!body || !GROUP_STATUSES.includes(body.status as GroupStatus)) {
@@ -130,7 +145,7 @@ export const createSvelteKitEventlog = (log: EventLog, options: SvelteKitOptions
     return group ? json({ success: true, group }) : fail("Not found", 404);
   };
 
-  const getEvent: RequestHandler = async (event) => {
+  const getEvent: Handler<E> = async (event) => {
     await options.authorize(event);
     const found = await log.query.getEvent((event.params.eventId ?? "").trim());
     return found ? json(found) : fail("Not found", 404);

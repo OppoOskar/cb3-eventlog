@@ -22,6 +22,7 @@ export const createSvelteKitEventlog = (log, options) => {
             ...extra,
         };
     };
+    /** Use as `export const handleError: HandleServerError = eventlog.handleError` in hooks.server.ts. */
     const handleError = ({ error, event, status }) => {
         // Unknown routes also land here — not worth recording.
         if (status === 404)

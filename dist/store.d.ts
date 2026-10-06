@@ -1,7 +1,14 @@
-import type { Db } from "mongodb";
 import { type GroupStatus, type Level, type LogContext, type LogEventItem, type LogGroupDetail, type LogGroupItem, type Paginated } from "./types.js";
+/**
+ * Anything with `collection(name)` — a mongodb `Db`. Typed structurally so an
+ * app's driver copy never has to match this package's (linked installs, minor
+ * version drift).
+ */
+export interface DbLike {
+    collection(name: string): unknown;
+}
 export interface EventLogOptions {
-    db: Db;
+    db: DbLike;
     /** Name of the emitting service, e.g. "cbp3" or "media-worker". */
     service: string;
     /** Build/deploy id stored on every event. */
