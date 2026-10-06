@@ -4,11 +4,14 @@ Errors, warnings and info events, grouped by kind and stored in MongoDB (`logGro
 
 ## Install
 
-```sh
-pnpm add "@cb3/eventlog@git+ssh://git@github.com/OppoOskar/cb3-eventlog.git#v0.1.0"
-```
+cbp3 and media-worker depend on the sibling checkout: `link:../cb3-eventlog` (pnpm) and `file:../cb3-eventlog` (npm). Their Docker builds take this folder as a named build context (`--build-context eventlog-src=../cb3-eventlog`, or `additional_contexts` in docker-compose) and build the package from `src/`.
 
-During development, link the local checkout instead: `link:../cb3-eventlog` (pnpm) or `file:../cb3-eventlog` (npm). `dist/` is committed on release tags, so installing from git needs no build step.
+The build **fails** in three cases:
+- the context is missing;
+- this checkout has uncommitted changes or untracked files that aren't ignored;
+- the package doesn't compile.
+
+So whatever goes live is always a committed state of this repo.
 
 ## Server
 
@@ -65,4 +68,4 @@ export const { GET } = eventlog.routes.event;
 
 ## Release
 
-Bump `version` in package.json, run `npm run release` (it tests, builds, commits `dist/` and tags), then run `git push && git push --tags`.
+Bump `version` in package.json, commit, then run `npm run release` (it refuses to run with uncommitted changes, then tests, builds and tags).
