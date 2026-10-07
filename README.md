@@ -50,6 +50,25 @@ log.info("upload.resumed");
 - Events expire after 30 days (errors, info) or 90 days (warnings). Groups are kept forever.
 - Index creation is left to one owner. In this setup cbp3 spreads `EVENTLOG_INDEXES` into its own index list.
 
+## Alerts
+
+Pass `onAlert` to be told when an error needs attention, e.g. to post it to Slack with `@oppooskar/slack`:
+
+```ts
+const log = createEventLog({
+  db, service: "cbp3",
+  onAlert: (alert) => postToSlack(alert),   // { reason, group, event, sinceLastAlert }
+  alertReminderHours: 24,                   // default; 0 = no reminders
+});
+```
+
+It fires for errors only, and once per group for each of:
+- `new` — the group's first occurrence;
+- `reopened` — the first occurrence after the group was resolved;
+- `reminder` — the group is still open and still happening, at most once per `alertReminderHours`. `sinceLastAlert` says how many occurrences there were since the previous alert.
+
+Each alert is claimed with one atomic update on the group (`alertedAt`), so when several instances share the database exactly one of them calls `onAlert`. It is awaited as part of the write; a failure is printed to the console and never logged as an event (no loops). Groups that existed before alerts were turned on alert as `new` on their next occurrence.
+
 ## Browser
 
 ```ts

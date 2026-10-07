@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Collection } from "mongodb";
+import { alertDueFilter, alertReason, sinceLastAlert } from "./alert.js";
 import { fingerprint, topFrame } from "./fingerprint.js";
 import { EVENT_COLLECTION, GROUP_COLLECTION } from "./indexes.js";
 import { normalizeError, sanitizeData, truncate } from "./serialize.js";
@@ -7,6 +8,7 @@ import {
   LIMITS,
   type DailyCount,
   type EventData,
+  type EventLogAlert,
   type GroupStatus,
   type Level,
   type LogContext,
@@ -32,6 +34,10 @@ interface GroupDoc {
   lastEventId: string;
   status: GroupStatus;
   resolvedAt: Date | null;
+  /** Alert bookkeeping — only written when `onAlert` is set. See alert.ts. */
+  alertedAt?: Date | null;
+  alertedCount?: number;
+  reopenedAt?: Date | null;
 }
 
 /** One document per occurrence; deleted at `expiresAt`. */
@@ -77,6 +83,17 @@ export interface EventLogOptions {
   retentionDays?: Partial<Record<Level, number>>;
   /** Codes browsers may report, with the level each must use. See validate.ts. */
   clientCodes?: Record<string, Level>;
+  /**
+   * Called when an error group needs attention: its first occurrence, its first
+   * occurrence after being resolved, and — while it keeps happening — at most
+   * once per `alertReminderHours`. Errors only. Each alert is claimed atomically
+   * in MongoDB, so with several instances exactly one of them calls this.
+   * Awaited (an uncaught exception waits for it before exiting); failures are
+   * printed, never thrown or logged as events.
+   */
+  onAlert?: (alert: EventLogAlert) => unknown;
+  /** Hours between reminders for an open error that keeps happening. Default 24; 0 turns reminders off. */
+  alertReminderHours?: number;
 }
 
 export interface Pagination {
@@ -92,6 +109,7 @@ export interface GroupFilter {
 }
 
 const DEFAULT_RETENTION: Record<Level, number> = { error: 30, warning: 90, info: 30 };
+const DEFAULT_REMINDER_HOURS = 24;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_EVENTS = 20;
 const SERIES_DAYS = 30;
@@ -149,6 +167,30 @@ export const createEventLog = (options: EventLogOptions) => {
   const groups = options.db.collection(GROUP_COLLECTION) as Collection<GroupDoc>;
   const events = options.db.collection(EVENT_COLLECTION) as Collection<EventDoc>;
   const retention = { ...DEFAULT_RETENTION, ...options.retentionDays };
+  const reminderHours = options.alertReminderHours ?? DEFAULT_REMINDER_HOURS;
+
+  /** Claims the group's alert if one is due, then hands it to `onAlert`. */
+  const alert = async (groupId: string, event: EventDoc) => {
+    const onAlert = options.onAlert;
+    if (!onAlert) return;
+    const now = new Date();
+    const before = await groups.findOneAndUpdate(
+      { _id: groupId, ...alertDueFilter(now, reminderHours) },
+      [{ $set: { alertedAt: now, alertedCount: "$count" } }],
+      { returnDocument: "before" }
+    );
+    if (!before) return;
+    try {
+      await onAlert({
+        reason: alertReason(before),
+        group: serializeGroup(before),
+        event: serializeEvent(event),
+        sinceLastAlert: sinceLastAlert(before),
+      });
+    } catch (err) {
+      console.error("[eventlog] onAlert failed:", err);
+    }
+  };
 
   const write = async (
     level: Level,
@@ -162,30 +204,32 @@ export const createEventLog = (options: EventLogOptions) => {
     const at = new Date();
     const data = sanitizeData(ctx.data);
 
+    const event: EventDoc = {
+      _id: eventId,
+      groupId,
+      level,
+      service,
+      code,
+      at,
+      expiresAt: new Date(at.getTime() + retention[level] * DAY_MS),
+      ...opt("requestId", ctx.requestId),
+      ...opt("method", ctx.method),
+      ...opt("url", ctx.url && truncate(ctx.url, LIMITS.url)),
+      ...opt("route", ctx.route),
+      ...opt("status", ctx.status),
+      ...opt("userId", ctx.userId),
+      ...opt("role", ctx.role),
+      ...opt("userAgent", ctx.userAgent && truncate(ctx.userAgent, LIMITS.userAgent)),
+      ...opt("version", options.version),
+      ...opt("errorType", body.errorType),
+      message: body.message,
+      stack: body.stack,
+      ...opt("data", data),
+    };
+
     // Event first: a resent report (same id) is a no-op and doesn't double count.
     try {
-      await events.insertOne({
-        _id: eventId,
-        groupId,
-        level,
-        service,
-        code,
-        at,
-        expiresAt: new Date(at.getTime() + retention[level] * DAY_MS),
-        ...opt("requestId", ctx.requestId),
-        ...opt("method", ctx.method),
-        ...opt("url", ctx.url && truncate(ctx.url, LIMITS.url)),
-        ...opt("route", ctx.route),
-        ...opt("status", ctx.status),
-        ...opt("userId", ctx.userId),
-        ...opt("role", ctx.role),
-        ...opt("userAgent", ctx.userAgent && truncate(ctx.userAgent, LIMITS.userAgent)),
-        ...opt("version", options.version),
-        ...opt("errorType", body.errorType),
-        message: body.message,
-        stack: body.stack,
-        ...opt("data", data),
-      });
+      await events.insertOne(event);
     } catch (err) {
       if (isDuplicateKey(err)) return;
       throw err;
@@ -195,7 +239,9 @@ export const createEventLog = (options: EventLogOptions) => {
     // Report values go through $literal — a message starting with "$" would
     // otherwise be read as a field path. A recurring error reopens its group
     // (a regression); warnings and info keep whatever status they have.
+    // Reopening also clears alertedAt so the regression is alerted right away.
     const reopen = level === "error";
+    const wasResolved = { $eq: ["$status", "resolved"] };
     const upsert = () =>
       groups.updateOne(
         { _id: groupId },
@@ -215,6 +261,10 @@ export const createEventLog = (options: EventLogOptions) => {
               lastEventId: { $literal: eventId },
               status: reopen ? "open" : { $ifNull: ["$status", "open"] },
               resolvedAt: reopen ? null : { $ifNull: ["$resolvedAt", null] },
+              ...(reopen && {
+                alertedAt: { $cond: [wasResolved, null, "$alertedAt"] },
+                reopenedAt: { $cond: [wasResolved, at, "$reopenedAt"] },
+              }),
             },
           },
         ],
@@ -227,6 +277,8 @@ export const createEventLog = (options: EventLogOptions) => {
       if (!isDuplicateKey(err)) throw err;
       await upsert();
     }
+
+    if (level === "error") await alert(groupId, event);
   };
 
   /** Never throws — the logger must not be able to cause errors of its own (or loop on them). */

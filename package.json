@@ -1,6 +1,6 @@
 {
   "name": "@oppooskar/eventlog",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Errors, warnings and info events grouped and stored in MongoDB — shared by cbp3 and media-worker.",
   "type": "module",
   "repository": {

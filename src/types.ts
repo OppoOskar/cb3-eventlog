@@ -118,6 +118,24 @@ export interface LogGroupDetail {
   daily: DailyCount[];
 }
 
+/**
+ * Why an error group needs attention:
+ * - `new`: its first occurrence;
+ * - `reopened`: it came back after being resolved;
+ * - `reminder`: it is still happening, at most once per `alertReminderHours`.
+ */
+export type AlertReason = "new" | "reopened" | "reminder";
+
+/** Passed to `onAlert`. `group` and `event` are the same shapes the admin API returns. */
+export interface EventLogAlert {
+  reason: AlertReason;
+  group: LogGroupItem;
+  /** The occurrence that triggered the alert. */
+  event: LogEventItem;
+  /** Reminders only: when the previous alert went out and how many occurrences there have been since. */
+  sinceLastAlert: { at: string; count: number } | null;
+}
+
 export interface Paginated<T> {
   items: T[];
   total: number;
