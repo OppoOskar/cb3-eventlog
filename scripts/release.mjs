@@ -1,6 +1,5 @@
-// Tests, builds and tags the version from package.json. Deploys build this
-// package from source (see the Dockerfiles in cbp3 and media-worker), so the
-// tag is a marker of what was released, not something they install from.
+// Tests, builds, tags and pushes the version from package.json. The pushed tag
+// triggers .github/workflows/publish.yml, which publishes to GitHub Packages.
 // Usage: bump "version" in package.json, commit, then `npm run release`.
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -15,4 +14,6 @@ if (execSync("git status --porcelain").toString().trim()) {
 run("npm test");
 run("npm run build");
 run(`git tag v${version}`);
-console.log(`\nTagged v${version}.`);
+run("git push origin HEAD");
+run(`git push origin v${version}`);
+console.log(`\nPushed v${version} — GitHub Actions publishes it to GitHub Packages.`);

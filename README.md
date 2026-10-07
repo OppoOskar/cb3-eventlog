@@ -1,22 +1,38 @@
-# @cb3/eventlog
+# @oppooskar/eventlog
 
 Errors, warnings and info events, grouped by kind and stored in MongoDB (`logGroup`, `logEvent`). Used by cbp3, which also shows them in `/admin/logs`, and by media-worker. Both write to the same database.
 
 ## Install
 
-cbp3 and media-worker depend on the sibling checkout: `link:../cb3-eventlog` (pnpm) and `file:../cb3-eventlog` (npm). Their Docker builds take this folder as a named build context (`--build-context eventlog-src=../cb3-eventlog`, or `additional_contexts` in docker-compose) and build the package from `src/`.
+Published to GitHub Packages. Consumers point the scope at the registry in their `.npmrc`:
 
-The build **fails** in three cases:
-- the context is missing;
-- this checkout has uncommitted changes or untracked files that aren't ignored;
-- the package doesn't compile.
+```
+@oppooskar:registry=https://npm.pkg.github.com
+```
 
-So whatever goes live is always a committed state of this repo.
+and install a version like any other dependency (`pnpm add @oppooskar/eventlog` / `npm install @oppooskar/eventlog`).
+
+Installing needs a token with `read:packages`, even for your own packages:
+- **Dev machine:** a classic personal access token in `~/.npmrc`: `//npm.pkg.github.com/:_authToken=ghp_...`
+- **Docker builds:** a read-only token passed as the `npm_token` build secret (see the Dockerfile and docker-compose.yml in cbp3 and media-worker). It never ends up in an image layer.
+
+## Developing against an app
+
+To try unreleased changes inside an app, link the checkout and rebuild on change:
+
+```sh
+# in cb3-eventlog
+npm run build -- --watch
+# in cbp3 / media-worker
+pnpm link ../cb3-eventlog   # or: npm link ../cb3-eventlog
+```
+
+Undo with `pnpm unlink @oppooskar/eventlog` / `npm install`. Don't commit the link — `package.json` keeps the version range.
 
 ## Server
 
 ```ts
-import { createEventLog, EVENTLOG_INDEXES } from "@cb3/eventlog";
+import { createEventLog, EVENTLOG_INDEXES } from "@oppooskar/eventlog";
 
 const log = createEventLog({ db, service: "media-worker", version: process.env.APP_VERSION });
 log.installProcessHandlers(); // unhandled rejections are recorded instead of crashing
@@ -37,7 +53,7 @@ log.info("upload.resumed");
 ## Browser
 
 ```ts
-import { createClientReporter } from "@cb3/eventlog/client";
+import { createClientReporter } from "@oppooskar/eventlog/client";
 
 const clientLog = createClientReporter({ endpoint: "/api/logs", version });
 clientLog.installGlobalHandlers({ getRoute: async () => (await import("$app/state")).page.route.id });
@@ -68,4 +84,4 @@ export const { GET } = eventlog.routes.event;
 
 ## Release
 
-Bump `version` in package.json, commit, then run `npm run release` (it refuses to run with uncommitted changes, then tests, builds and tags).
+Bump `version` in package.json, commit, then run `npm run release`. It refuses to run with uncommitted changes, then tests, builds, tags and pushes. The pushed `v*` tag triggers `.github/workflows/publish.yml`, which publishes to GitHub Packages. Published versions are permanent — fix mistakes with a new version.
